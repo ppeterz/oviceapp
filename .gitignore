@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Vercel deployment artifacts
+.vercel
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# Local take outputs (keep folder, don't commit generated audio)
+outputs/*.mp3
+outputs/*.json
+!outputs/.gitkeep
+
+# System
+.DS_Store
+Thumbs.db

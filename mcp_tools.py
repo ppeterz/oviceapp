@@ -433,7 +433,27 @@ def list_voices() -> str:
     return json.dumps(VOICES, indent=2)
 
 
-@mcp.tool()
+@mcp.resource(
+    "ui://voiceover-studio/player",
+    name="Voiceover Audio Player",
+    description="Interactive audio player widget that renders inline after voiceover generation.",
+    mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"prefersBorder": False}}
+)
+def get_player_widget() -> str:
+    """Return the HTML/JS interactive audio player widget for MCP Apps."""
+    from mcp_http_router import PLAYER_HTML
+    return PLAYER_HTML
+
+
+@mcp.tool(
+    meta={
+        "ui": {
+            "resourceUri": "ui://voiceover-studio/player"
+        },
+        "ui/resourceUri": "ui://voiceover-studio/player"
+    }
+)
 def generate_voiceover(
     text: str,
     voice_id: str = "Eleanor",

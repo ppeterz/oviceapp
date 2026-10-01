@@ -38,90 +38,12 @@ try:
 except ImportError:
     sys.exit("This script needs the 'requests' package: pip install requests --break-system-packages")
 
+from mcp_tools import Segment, parse_script_into_segments, clean_text_segment
+
 DEFAULT_BASE_URL = "https://api.v8.unrealspeech.com"
 
 
-# ============================================================================
-# SCRIPT PACING ENGINE (mirrors server.py)
-# ============================================================================
-
-def clean_text_segment(text: str) -> str:
-    """Normalizes prosody, em dashes, and sentence-terminating punctuation."""
-    t = text.strip()
-    if not t:
-        return ""
-    t = re.sub(r'\s*—\s*', ' — ', t)
-    t = re.sub(r'\s*--\s*', ' — ', t)
-    t = re.sub(r'\.{2,}', '...', t)
-    if not re.search(r'[.!?…]$', t):
-        t += '.'
-    return t
-
-
-def parse_script_into_segments(text: str, default_paragraph_pause: float = 0.8):
-    """Parses a script into a list of (segment_text, pause_after_sec)."""
-    if not text or not text.strip():
-        return []
-
-    norm_text = text.replace('\r\n', '\n').strip()
-
-    pause_tag_pattern = re.compile(
-        r'(\[(?:pause|break)[:\s]*([\d.]*)s?\]|\((?:pause|break)[:\s]*([\d.]*)s?\)|\[beat\]|<break\s+time=["\']?([\d.]+)(m?s)["\']?\s*/?>)',
-        re.IGNORECASE
-    )
-
-    raw_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', norm_text) if p.strip()]
-    segments = []
-
-    for p_idx, para in enumerate(raw_paragraphs):
-        is_last_paragraph = (p_idx == len(raw_paragraphs) - 1)
-
-        matches = list(pause_tag_pattern.finditer(para))
-        if not matches:
-            clean_p = clean_text_segment(para)
-            if clean_p:
-                pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                segments.append((clean_p, pause_after))
-        else:
-            last_end = 0
-            for match in matches:
-                span_start, span_end = match.span()
-                part_text = para[last_end:span_start].strip()
-
-                full_tag = match.group(0).lower()
-                dur_val = match.group(2) or match.group(3) or match.group(4)
-                unit = match.group(5) or 's'
-
-                if dur_val:
-                    try:
-                        pause_sec = float(dur_val)
-                        if unit == 'ms':
-                            pause_sec /= 1000.0
-                    except ValueError:
-                        pause_sec = 0.6
-                elif 'beat' in full_tag:
-                    pause_sec = 0.5
-                else:
-                    pause_sec = 0.8
-
-                if part_text:
-                    clean_part = clean_text_segment(part_text)
-                    if clean_part:
-                        segments.append((clean_part, pause_sec))
-                elif segments:
-                    prev_text, prev_pause = segments[-1]
-                    segments[-1] = (prev_text, prev_pause + pause_sec)
-
-                last_end = span_end
-
-            remaining = para[last_end:].strip()
-            if remaining:
-                clean_rem = clean_text_segment(remaining)
-                if clean_rem:
-                    pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                    segments.append((clean_rem, pause_after))
-
-    return segments
+# Prosody & pacing engine is imported from mcp_tools (Segment, parse_script_into_segments, clean_text_segment)
 
 
 def synthesize_segment(text, voice_id, bitrate, speed, pitch, api_key, base_url, timestamp_type="sentence"):
@@ -186,6 +108,7 @@ def main():
     parser.add_argument("--timestamp-type", default="sentence", choices=["sentence", "word"], help="Granularity of the timestamp data returned alongside the audio")
     parser.add_argument("--paragraph-pause", type=float, default=0.8, help="Silence duration between paragraphs in seconds (0.0 to 3.0). Default: 0.8")
     parser.add_argument("--no-smart-pacing", action="store_true", help="Disable smart pacing (send entire script as single API call)")
+    parser.add_argument("--no-smart-intonation", action="store_true", help="Disable smart intonation heuristics for questions and exclamations")
     args = parser.parse_args()
 
     api_key = os.environ.get("UNREALSPEECH_API_KEY")
@@ -201,30 +124,36 @@ def main():
     if not text:
         sys.exit("Text file is empty.")
 
-    # ── Smart Pacing: Parse & Segment ──
+    # ── Smart Pacing & Prosody: Parse & Segment ──
     if not args.no_smart_pacing:
-        segments = parse_script_into_segments(text, args.paragraph_pause)
-        print(f"[PACING] Script parsed into {len(segments)} segment(s) (paragraph pause: {args.paragraph_pause}s)")
+        segments = parse_script_into_segments(
+            text,
+            default_paragraph_pause=args.paragraph_pause,
+            base_speed=args.speed,
+            base_pitch=args.pitch,
+            smart_intonation=not args.no_smart_intonation
+        )
+        print(f"[PACING] Script parsed into {len(segments)} segment(s) (paragraph pause: {args.paragraph_pause}s, smart intonation: {not args.no_smart_intonation})")
     else:
         if len(text) > 3000:
             sys.exit(f"Script is {len(text)} characters; /speech caps at 3000. Use smart pacing or split manually.")
-        segments = [(clean_text_segment(text), 0.0)]
+        segments = [Segment(clean_text_segment(text, is_sentence_end=True), 0.0, args.speed, args.pitch, is_sentence_end=True)]
         print(f"[SINGLE-PASS] Sending entire script as one API call ({len(text)} chars)")
 
     # Validate segment lengths
-    for i, (seg_text, _) in enumerate(segments):
-        if len(seg_text) > 3000:
-            sys.exit(f"Segment {i+1} is {len(seg_text)} characters (max 3000). Break it into shorter paragraphs.")
+    for i, seg in enumerate(segments):
+        if len(seg.text) > 3000:
+            sys.exit(f"Segment {i+1} is {len(seg.text)} characters (max 3000). Break it into shorter paragraphs.")
 
     if not segments:
         sys.exit("Script produced no valid segments after parsing.")
 
     # ── Single segment: fast path ──
     if len(segments) == 1:
-        seg_text, _ = segments[0]
-        print(f"Requesting voiceover for {len(seg_text.split())} words from voice {args.voice_id}...")
+        seg = segments[0]
+        print(f"Requesting voiceover for {len(seg.text.split())} words from voice {args.voice_id} (speed={seg.speed}, pitch={seg.pitch})...")
         audio_bytes = synthesize_segment(
-            seg_text, args.voice_id, args.bitrate, args.speed, args.pitch,
+            seg.text, args.voice_id, args.bitrate, seg.speed, seg.pitch,
             api_key, args.base_url, args.timestamp_type
         )
         with open(args.out, "wb") as f:
@@ -233,8 +162,8 @@ def main():
         return
 
     # ── Multi-segment: Parallel synthesis + silence stitching ──
-    total_words = sum(len(seg.split()) for seg, _ in segments)
-    print(f"Synthesizing {len(segments)} segments ({total_words} total words) in parallel...")
+    total_words = sum(len(seg.text.split()) for seg in segments)
+    print(f"Synthesizing {len(segments)} segments ({total_words} total words) in parallel with per-word/per-sentence pitch...")
 
     silence_frames = load_silence_frames()
     segment_audio = {}
@@ -242,10 +171,10 @@ def main():
 
     with ThreadPoolExecutor(max_workers=min(4, len(segments))) as executor:
         future_to_idx = {}
-        for idx, (seg_text, _) in enumerate(segments):
+        for idx, seg in enumerate(segments):
             future = executor.submit(
                 synthesize_segment,
-                seg_text, args.voice_id, args.bitrate, args.speed, args.pitch,
+                seg.text, args.voice_id, args.bitrate, seg.speed, seg.pitch,
                 api_key, args.base_url, args.timestamp_type
             )
             future_to_idx[future] = idx
@@ -254,8 +183,8 @@ def main():
             idx = future_to_idx[future]
             try:
                 segment_audio[idx] = future.result()
-                seg_text, _ = segments[idx]
-                print(f"  ✓ Segment {idx+1}/{len(segments)} synthesized ({len(segment_audio[idx])} bytes, {len(seg_text.split())} words)")
+                seg = segments[idx]
+                print(f"  ✓ Segment {idx+1}/{len(segments)} synthesized ({len(segment_audio[idx])} bytes, speed={seg.speed}, pitch={seg.pitch})")
             except Exception as e:
                 errors.append(f"Segment {idx+1}: {str(e)}")
                 print(f"  ✗ Segment {idx+1} FAILED: {str(e)}")
@@ -268,14 +197,14 @@ def main():
     master = io.BytesIO()
 
     for idx in range(len(segments)):
-        seg_text, pause_after = segments[idx]
+        seg = segments[idx]
         master.write(segment_audio[idx])
 
-        if pause_after > 0 and idx < len(segments) - 1:
-            silence = generate_silence_bytes(silence_frames, pause_after)
+        if seg.pause_after > 0 and idx < len(segments) - 1:
+            silence = generate_silence_bytes(silence_frames, seg.pause_after)
             if silence:
                 master.write(silence)
-                print(f"  + {pause_after:.1f}s silence after segment {idx+1}")
+                print(f"  + {seg.pause_after:.2f}s silence after segment {idx+1}")
 
     final_audio = master.getvalue()
 

@@ -15,7 +15,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, NamedTuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -123,89 +123,344 @@ VOICES = [
 
 
 # ============================================================================
-# SCRIPT PACING ENGINE
+# SCRIPT PACING & PROSODY ENGINE (PER-SENTENCE & PER-WORD PITCH CONTROL)
 # ============================================================================
 
-def clean_text_segment(text: str) -> str:
-    """Normalizes prosody, em dashes, and sentence-terminating punctuation."""
+class Segment(NamedTuple):
+    text: str
+    pause_after: float
+    speed: float
+    pitch: float
+    is_sentence_end: bool = True
+
+
+SEMANTIC_PITCH_MAP = {
+    "high": 1.12,
+    "up": 1.12,
+    "elevate": 1.12,
+    "higher": 1.20,
+    "excited": 1.20,
+    "peak": 1.22,
+    "low": 0.88,
+    "down": 0.88,
+    "deep": 0.84,
+    "lower": 0.82,
+    "somber": 0.82,
+    "whisper": 0.78,
+    "hush": 0.78,
+    "aside": 0.85,
+    "rise": 1.10,
+    "question": 1.10,
+    "drop": 0.90,
+    "fall": 0.90,
+    "normal": 1.0,
+    "neutral": 1.0,
+    "reset": 1.0,
+}
+
+SEMANTIC_SPEED_MAP = {
+    "fast": 0.25,
+    "faster": 0.40,
+    "slow": -0.20,
+    "slower": -0.35,
+    "normal": 0.0,
+    "rush": 0.35,
+    "deliberate": -0.15,
+}
+
+
+def resolve_pitch_value(raw: str, base_pitch: float = 1.0) -> float:
+    """Resolves raw pitch strings (e.g. '+10%', 'high', '1.15', '-0.08') into a float between 0.5 and 1.5."""
+    raw_str = raw.strip().lower()
+    if raw_str in SEMANTIC_PITCH_MAP:
+        return round(max(0.5, min(1.5, base_pitch * SEMANTIC_PITCH_MAP[raw_str])), 3)
+    if raw_str.endswith('%'):
+        try:
+            pct_val = float(raw_str[:-1])
+            return round(max(0.5, min(1.5, base_pitch * (1.0 + pct_val / 100.0))), 3)
+        except ValueError:
+            pass
+    if raw_str.startswith('+') or raw_str.startswith('-'):
+        try:
+            delta = float(raw_str)
+            return round(max(0.5, min(1.5, base_pitch + delta)), 3)
+        except ValueError:
+            pass
+    try:
+        val = float(raw_str)
+        return round(max(0.5, min(1.5, val)), 3)
+    except ValueError:
+        return round(base_pitch, 3)
+
+
+def resolve_speed_value(raw: str, base_speed: float = 0.0) -> float:
+    """Resolves raw speed strings (e.g. '+15%', 'fast', '0.2') into a float between -1.0 and 1.0."""
+    raw_str = raw.strip().lower()
+    if raw_str in SEMANTIC_SPEED_MAP:
+        return round(max(-1.0, min(1.0, base_speed + SEMANTIC_SPEED_MAP[raw_str])), 3)
+    if raw_str.endswith('%'):
+        try:
+            pct_val = float(raw_str[:-1])
+            return round(max(-1.0, min(1.0, base_speed + (pct_val / 100.0))), 3)
+        except ValueError:
+            pass
+    try:
+        val = float(raw_str)
+        return round(max(-1.0, min(1.0, val)), 3)
+    except ValueError:
+        return round(base_speed, 3)
+
+
+def clean_text_segment(text: str, is_sentence_end: bool = True) -> str:
+    """Normalizes prosody, em dashes, and punctuation. Only forces trailing period if is_sentence_end=True."""
     t = text.strip()
     if not t:
         return ""
     t = re.sub(r'\s*—\s*', ' — ', t)
     t = re.sub(r'\s*--\s*', ' — ', t)
     t = re.sub(r'\.{2,}', '...', t)
-    if not re.search(r'[.!?…]$', t):
-        t += '.'
+    if is_sentence_end:
+        if not re.search(r'[.!?…][)"]?$', t):
+            t += '.'
     return t
 
 
-def parse_script_into_segments(text: str, default_paragraph_pause: float = 0.8):
+# Master pattern for prosody tags & pause tags using named groups throughout
+PROSODY_TAG_REGEX = re.compile(
+    r'(?P<pause>\[(?:pause|break)[:\s]*(?P<pause_num>[\d.]*)s?\]|\((?:pause|break)[:\s]*(?P<pause_num_paren>[\d.]*)s?\)|\[beat\]|<break\s+time=["\']?(?P<pause_num_xml>[\d.]+)(?P<pause_unit>m?s)["\']?\s*/?>)'
+    r'|'
+    r'(?P<pitch_tag>\[pitch(?::|\s*=)\s*(?P<pitch_arg>[^\]]+)\](?P<pitch_content>.*?)\[/pitch\])'
+    r'|'
+    r'(?P<speed_tag>\[speed(?::|\s*=)\s*(?P<speed_arg>[^\]]+)\](?P<speed_content>.*?)\[/speed\])'
+    r'|'
+    r'(?P<named_pitch_tag>\[(?P<named_tag>high|higher|excited|low|lower|deep|whisper|rise|drop)\](?P<named_content>.*?)\[/(?P=named_tag)\])'
+    r'|'
+    r'(?P<ssml_prosody><prosody(?:\s+pitch=["\']?(?P<ssml_pitch_val>[^"\'>]+)["\']?)?(?:\s+rate=["\']?(?P<ssml_rate_val>[^"\'>]+)["\']?)?\s*>(?P<prosody_content>.*?)</prosody>)'
+    r'|'
+    r'(?P<ssml_pitch><pitch(?:\s+val(?:ue)?=["\']?(?P<xml_pitch_val>[^"\'>]+)["\']?)?\s*>(?P<xml_pitch_content>.*?)</pitch>)',
+    re.IGNORECASE | re.DOTALL
+)
+
+
+def parse_paragraph_intonation(
+    para: str,
+    default_pause: float,
+    base_speed: float = 0.0,
+    base_pitch: float = 1.0,
+    smart_intonation: bool = True,
+    is_last_paragraph: bool = False
+) -> List[Segment]:
     """
-    Parses a script into a list of (segment_text, pause_after_sec).
-    Handles paragraph breaks, explicit pause markers, and punctuation normalization.
+    Parses a single paragraph into segments with per-word or per-sentence pitch & speed.
+    """
+    segments: List[Segment] = []
+    matches = list(PROSODY_TAG_REGEX.finditer(para))
+
+    if not matches:
+        # No explicit tags in paragraph.
+        # Check if smart_intonation should split on sentence punctuation (? / ! / ...)
+        if smart_intonation and re.search(r'[?!]', para):
+            sentence_parts = re.split(r'([.!?…]+(?:\s+|$))', para)
+            i = 0
+            while i < len(sentence_parts):
+                sent_text = sentence_parts[i]
+                punct = sentence_parts[i+1] if i + 1 < len(sentence_parts) else ""
+                i += 2
+
+                combined = (sent_text + punct).strip()
+                if not combined:
+                    continue
+
+                seg_pitch = base_pitch
+                if combined.endswith('?'):
+                    seg_pitch = round(min(1.5, base_pitch * 1.07), 3)  # Inquiry / question rise
+                elif combined.endswith('!'):
+                    seg_pitch = round(min(1.5, base_pitch * 1.08), 3)  # Exclamation / excitement
+                elif combined.startswith('(') and combined.endswith(')'):
+                    seg_pitch = round(max(0.5, base_pitch * 0.92), 3)  # Parenthetical / aside
+
+                is_para_end = (i >= len(sentence_parts))
+                pause_after = (0.0 if is_last_paragraph else default_pause) if is_para_end else 0.30
+
+                clean_s = clean_text_segment(combined, is_sentence_end=True)
+                if clean_s:
+                    segments.append(Segment(clean_s, pause_after, base_speed, seg_pitch, is_sentence_end=True))
+            return segments
+
+        # Plain paragraph without tags or ?/!
+        clean_p = clean_text_segment(para, is_sentence_end=True)
+        if clean_p:
+            pause_after = 0.0 if is_last_paragraph else default_pause
+            segments.append(Segment(clean_p, pause_after, base_speed, base_pitch, is_sentence_end=True))
+        return segments
+
+    # Paragraph has tags -> tokenize sequentially
+    raw_tokens: List[Tuple[str, str, float, float, float]] = []
+
+    def add_plain_block(raw_text: str):
+        if not raw_text.strip():
+            return
+        parts = re.split(r'([.!?…]+(?:\s+|$))', raw_text)
+        i = 0
+        while i < len(parts):
+            txt = parts[i]
+            punct = parts[i+1] if i + 1 < len(parts) else ""
+            i += 2
+            combined = (txt + punct).strip()
+            if not combined:
+                continue
+
+            p = base_pitch
+            if smart_intonation:
+                if combined.endswith('?'):
+                    p = round(min(1.5, base_pitch * 1.07), 3)
+                elif combined.endswith('!'):
+                    p = round(min(1.5, base_pitch * 1.08), 3)
+                elif combined.startswith('(') and combined.endswith(')'):
+                    p = round(max(0.5, base_pitch * 0.92), 3)
+
+            raw_tokens.append(("plain", combined, base_speed, p, 0.0))
+
+    last_end = 0
+    for match in matches:
+        start, end = match.span()
+        if start > last_end:
+            interim = para[last_end:start]
+            add_plain_block(interim)
+
+        m_dict = match.groupdict()
+
+        # Check if immediate next character is trailing punctuation (e.g. [/pitch]. or [/pitch],)
+        trailing_punct_match = re.match(r'^([.!?…]+|[,;:])(?:\s+|$)', para[end:])
+        trailing_punct = ""
+        if trailing_punct_match and not m_dict.get("pause"):
+            trailing_punct = trailing_punct_match.group(1)
+            end += trailing_punct_match.end()
+
+        if m_dict.get("pause"):
+            full_tag = match.group(0).lower()
+            dur_val = m_dict.get("pause_num") or m_dict.get("pause_num_paren") or m_dict.get("pause_num_xml")
+            unit = m_dict.get("pause_unit") or 's'
+            if dur_val:
+                try:
+                    p_sec = float(dur_val)
+                    if unit == 'ms':
+                        p_sec /= 1000.0
+                except ValueError:
+                    p_sec = 0.6
+            elif 'beat' in full_tag:
+                p_sec = 0.5
+            else:
+                p_sec = 0.8
+            raw_tokens.append(("pause", "", base_speed, base_pitch, p_sec))
+
+        elif m_dict.get("pitch_tag"):
+            pitch_arg = m_dict.get("pitch_arg") or "1.0"
+            content = (m_dict.get("pitch_content") or "") + trailing_punct
+            target_pitch = resolve_pitch_value(pitch_arg, base_pitch)
+            raw_tokens.append(("tagged", content, base_speed, target_pitch, 0.0))
+
+        elif m_dict.get("speed_tag"):
+            speed_arg = m_dict.get("speed_arg") or "0.0"
+            content = (m_dict.get("speed_content") or "") + trailing_punct
+            target_speed = resolve_speed_value(speed_arg, base_speed)
+            raw_tokens.append(("tagged", content, target_speed, base_pitch, 0.0))
+
+        elif m_dict.get("named_pitch_tag"):
+            tag_name = m_dict.get("named_tag") or "normal"
+            content = (m_dict.get("named_content") or "") + trailing_punct
+            target_pitch = resolve_pitch_value(tag_name, base_pitch)
+            raw_tokens.append(("tagged", content, base_speed, target_pitch, 0.0))
+
+        elif m_dict.get("ssml_prosody"):
+            p_arg = m_dict.get("ssml_pitch_val")
+            r_arg = m_dict.get("ssml_rate_val")
+            content = (m_dict.get("prosody_content") or "") + trailing_punct
+            seg_p = resolve_pitch_value(p_arg, base_pitch) if p_arg else base_pitch
+            seg_s = resolve_speed_value(r_arg, base_speed) if r_arg else base_speed
+            raw_tokens.append(("tagged", content, seg_s, seg_p, 0.0))
+
+        elif m_dict.get("ssml_pitch"):
+            val_arg = m_dict.get("xml_pitch_val")
+            content = (m_dict.get("xml_pitch_content") or "") + trailing_punct
+            target_pitch = resolve_pitch_value(val_arg, base_pitch) if val_arg else base_pitch
+            raw_tokens.append(("tagged", content, base_speed, target_pitch, 0.0))
+
+        last_end = end
+
+    if last_end < len(para):
+        rem = para[last_end:]
+        add_plain_block(rem)
+
+    active_tokens: List[Tuple[str, float, float, float]] = []
+
+    for t_type, t_text, t_speed, t_pitch, t_pause in raw_tokens:
+        if t_type == "pause":
+            if active_tokens:
+                txt, spd, pit, p_pause = active_tokens[-1]
+                active_tokens[-1] = (txt, spd, pit, p_pause + t_pause)
+        else:
+            txt = t_text.strip()
+            if txt:
+                active_tokens.append((txt, t_speed, t_pitch, 0.0))
+
+    for idx, (txt, spd, pit, explicit_pause) in enumerate(active_tokens):
+        is_last_token = (idx == len(active_tokens) - 1)
+        ends_sentence = bool(re.search(r'[.!?…]$', txt))
+
+        if explicit_pause > 0:
+            pause_after = explicit_pause
+        elif is_last_token:
+            pause_after = 0.0 if is_last_paragraph else default_pause
+        elif ends_sentence:
+            pause_after = 0.30
+        else:
+            # Mid-sentence word or clause: zero pause so speech flows seamlessly
+            pause_after = 0.0
+
+        clean_text = clean_text_segment(txt, is_sentence_end=ends_sentence)
+        if clean_text:
+            segments.append(Segment(clean_text, pause_after, spd, pit, is_sentence_end=ends_sentence))
+
+    return segments
+
+
+def parse_script_into_segments(
+    text: str,
+    default_paragraph_pause: float = 0.8,
+    base_speed: float = 0.0,
+    base_pitch: float = 1.0,
+    smart_intonation: bool = True
+) -> List[Segment]:
+    """
+    Parses a script into a list of Segment(text, pause_after, speed, pitch, is_sentence_end).
+    Supports:
+    - Per-word and per-sentence pitch tags ([pitch: 1.15], [pitch: +10%], [pitch: high], [whisper], [rise])
+    - Per-word speed tags ([speed: fast], [speed: 0.2])
+    - Smart human intonation on punctuation (? -> rising pitch, ! -> exclamation energy)
+    - Zero pause on mid-sentence words for smooth, natural delivery
+    - Paragraph pause stitching and explicit pause tags ([pause: 1s], [beat])
     """
     if not text or not text.strip():
         return []
 
     norm_text = text.replace('\r\n', '\n').strip()
-
-    pause_tag_pattern = re.compile(
-        r'(\[(?:pause|break)[:\s]*([\d.]*)s?\]|\((?:pause|break)[:\s]*([\d.]*)s?\)|\[beat\]|<break\s+time=["\']?([\d.]+)(m?s)["\']?\s*/?>)',
-        re.IGNORECASE
-    )
-
     raw_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', norm_text) if p.strip()]
-    segments = []
 
+    all_segments: List[Segment] = []
     for p_idx, para in enumerate(raw_paragraphs):
-        is_last_paragraph = (p_idx == len(raw_paragraphs) - 1)
+        is_last = (p_idx == len(raw_paragraphs) - 1)
+        p_segs = parse_paragraph_intonation(
+            para=para,
+            default_pause=default_paragraph_pause,
+            base_speed=base_speed,
+            base_pitch=base_pitch,
+            smart_intonation=smart_intonation,
+            is_last_paragraph=is_last
+        )
+        all_segments.extend(p_segs)
 
-        matches = list(pause_tag_pattern.finditer(para))
-        if not matches:
-            clean_p = clean_text_segment(para)
-            if clean_p:
-                pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                segments.append((clean_p, pause_after))
-        else:
-            last_end = 0
-            for match in matches:
-                span_start, span_end = match.span()
-                part_text = para[last_end:span_start].strip()
-
-                full_tag = match.group(0).lower()
-                dur_val = match.group(2) or match.group(3) or match.group(4)
-                unit = match.group(5) or 's'
-
-                if dur_val:
-                    try:
-                        pause_sec = float(dur_val)
-                        if unit == 'ms':
-                            pause_sec /= 1000.0
-                    except ValueError:
-                        pause_sec = 0.6
-                elif 'beat' in full_tag:
-                    pause_sec = 0.5
-                else:
-                    pause_sec = 0.8
-
-                if part_text:
-                    clean_part = clean_text_segment(part_text)
-                    if clean_part:
-                        segments.append((clean_part, pause_sec))
-                elif segments:
-                    prev_text, prev_pause = segments[-1]
-                    segments[-1] = (prev_text, prev_pause + pause_sec)
-
-                last_end = span_end
-
-            remaining = para[last_end:].strip()
-            if remaining:
-                clean_rem = clean_text_segment(remaining)
-                if clean_rem:
-                    pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                    segments.append((clean_rem, pause_after))
-
-    return segments
+    return all_segments
 
 
 def generate_silence_bytes(duration_sec: float) -> bytes:
@@ -270,9 +525,11 @@ def _generate_audio(
     paragraph_pause: float,
     smart_pacing: bool,
     api_key: str,
+    smart_intonation: bool = True,
 ) -> tuple:
     """
-    Core generation logic. Returns (audio_bytes, segments_count, total_words) or raises.
+    Core generation logic with per-sentence and per-word pitch control.
+    Returns (audio_bytes, segments_count, total_words) or raises.
     """
     clean_text = text.strip()
     if not clean_text:
@@ -287,26 +544,32 @@ def _generate_audio(
     paragraph_pause = max(0.0, min(3.0, paragraph_pause))
 
     if smart_pacing:
-        segments = parse_script_into_segments(clean_text, paragraph_pause)
+        segments = parse_script_into_segments(
+            clean_text,
+            default_paragraph_pause=paragraph_pause,
+            base_speed=speed,
+            base_pitch=pitch,
+            smart_intonation=smart_intonation
+        )
     else:
-        segments = [(clean_text_segment(clean_text), 0.0)]
+        segments = [Segment(clean_text_segment(clean_text, is_sentence_end=True), 0.0, speed, pitch, is_sentence_end=True)]
 
-    for i, (seg_text, _) in enumerate(segments):
-        if len(seg_text) > 3000:
+    for i, seg in enumerate(segments):
+        if len(seg.text) > 3000:
             raise ValueError(
-                f"Segment {i+1} is {len(seg_text)} chars (max 3000). "
+                f"Segment {i+1} is {len(seg.text)} chars (max 3000). "
                 "Break it into shorter paragraphs."
             )
 
     if not segments:
         raise ValueError("Script produced no valid segments after parsing.")
 
-    total_words = sum(len(seg.split()) for seg, _ in segments)
+    total_words = sum(len(seg.text.split()) for seg in segments)
 
     # Single segment fast path
     if len(segments) == 1:
-        seg_text, _ = segments[0]
-        audio_bytes = synthesize_segment(seg_text, voice_id, bitrate, speed, pitch, api_key)
+        seg = segments[0]
+        audio_bytes = synthesize_segment(seg.text, voice_id, bitrate, seg.speed, seg.pitch, api_key)
         return audio_bytes, 1, total_words
 
     # Multi-segment: parallel synthesis + silence stitching
@@ -315,9 +578,9 @@ def _generate_audio(
 
     with ThreadPoolExecutor(max_workers=min(4, len(segments))) as executor:
         future_to_idx = {}
-        for idx, (seg_text, _) in enumerate(segments):
+        for idx, seg in enumerate(segments):
             future = executor.submit(
-                synthesize_segment, seg_text, voice_id, bitrate, speed, pitch, api_key
+                synthesize_segment, seg.text, voice_id, bitrate, seg.speed, seg.pitch, api_key
             )
             future_to_idx[future] = idx
 
@@ -335,10 +598,10 @@ def _generate_audio(
 
     master = io.BytesIO()
     for idx in range(len(segments)):
-        seg_text, pause_after = segments[idx]
+        seg = segments[idx]
         master.write(segment_audio[idx])
-        if pause_after > 0 and idx < len(segments) - 1:
-            silence = generate_silence_bytes(pause_after)
+        if seg.pause_after > 0 and idx < len(segments) - 1:
+            silence = generate_silence_bytes(seg.pause_after)
             if silence:
                 master.write(silence)
 
@@ -473,6 +736,7 @@ def generate_voiceover(
     bitrate: str = "192k",
     paragraph_pause: float = 0.8,
     smart_pacing: bool = True,
+    smart_intonation: bool = True,
 ) -> str:
     """
     Generate a voiceover MP3 from script text using neural AI voices (Kokoro TTS).
@@ -480,29 +744,38 @@ def generate_voiceover(
     The generated MP3 is saved to the server's outputs/ folder and metadata is
     returned including the file path and download URL.
 
+    NATURAL HUMAN SPEECH & PITCH CONTROL:
+    To make voiceovers feel alive and natural like human speech:
+    - Per-word / per-sentence pitch markup:
+        * Numeric: [pitch: 1.15]emphasized word[/pitch] or [pitch: 0.85]somber note[/pitch]
+        * Relative: [pitch: +10%]word[/pitch] or [pitch: -8%]whisper[/pitch]
+        * Semantic: [pitch: high], [pitch: low], [pitch: whisper], [pitch: rise], [pitch: drop], [pitch: excited]
+        * Shorthand tags: [high]word[/high], [low]word[/low], [whisper]phrase[/whisper], [rise]word[/rise]
+        * Speed markup: [speed: 0.15]rapid[/speed] or [speed: fast]urgent[/speed]
+    - Smart Human Intonation (smart_intonation=True):
+        * Automatically adds rising pitch inflection (+7%) on questions (?)
+        * Adds energetic projection (+8%) on exclamations (!)
+        * Subdues pitch (-8%) on parenthetical asides (...)
+
     INSTRUCTIONS FOR CLAUDE -- CHOOSING SETTINGS:
     Before calling this tool, call list_voices to see all voices.
     Then analyze the script content and pick the best voice:
     - Match voice gender to user preference if stated
     - Match voice style to script tone (warm narrative -> Eleanor, thriller -> Jasper, etc.)
-    - For speed: keep at 0.0 (normal) unless the content calls for slower (-0.1 to -0.3
-      for dramatic/calm) or faster (+0.1 to +0.2 for energetic)
-    - For pitch: keep at 1.0 unless male voice benefits from slightly lower (0.92)
-      or the content needs higher energy (1.05-1.1)
-    - Use smart_pacing=True (default) for multi-paragraph scripts
+    - Use smart_pacing=True and smart_intonation=True for natural human-like cadence.
 
     Args:
-        text: The script text to synthesize. Supports paragraph breaks and
-              pause markers like [pause: 1.2s], [beat], (pause).
-              Max 3000 characters per paragraph segment.
+        text: The script text to synthesize. Supports prosody tags ([pitch: high], [whisper])
+              and pause markers like [pause: 1.2s], [beat].
         voice_id: Kokoro TTS voice. One of: Eleanor, Jasper, Ivy, Oliver,
                   Luna, Ethan, Charlotte, Rafael. Default: Eleanor.
-        speed: Pacing from -1.0 (slow) to 1.0 (fast). 0.0 is normal.
-        pitch: Pitch from 0.5 to 1.5. Default 1.0.
+        speed: Base pacing from -1.0 (slow) to 1.0 (fast). 0.0 is normal.
+        pitch: Base pitch from 0.5 to 1.5. Default 1.0.
         bitrate: Audio quality. 192k (default), 128k, 256k, or 320k.
         paragraph_pause: Seconds of silence between paragraphs (0.0-3.0). Default 0.8.
-        smart_pacing: If True (default), parses paragraph breaks and pause
-                      markers for natural segment-by-segment synthesis.
+        smart_pacing: If True (default), parses paragraph breaks and pause markers.
+        smart_intonation: If True (default), automatically applies human inflection
+                          to questions, exclamations, and parentheticals.
 
     Returns:
         JSON with success status, file_path, filename, word_count, and settings used.
@@ -516,7 +789,8 @@ def generate_voiceover(
 
     try:
         audio_bytes, segment_count, total_words = _generate_audio(
-            text, voice_id, speed, pitch, bitrate, paragraph_pause, smart_pacing, api_key
+            text, voice_id, speed, pitch, bitrate, paragraph_pause, smart_pacing, api_key,
+            smart_intonation=smart_intonation
         )
     except (ValueError, RuntimeError) as e:
         return json.dumps({"error": True, "message": str(e)})

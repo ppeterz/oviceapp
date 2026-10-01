@@ -89,6 +89,7 @@ const state = {
   // Pacing & Cadence
   paragraphPause: 0.8,
   smartPacing: true,
+  smartIntonation: true,
   
   // Playback state
   isPlaying: false,
@@ -147,6 +148,12 @@ const dom = {
   pasteClipboardBtn: document.getElementById("paste-clipboard-btn"),
   clearScriptBtn: document.getElementById("clear-script-btn"),
 
+  // Pitch Prosody Tags
+  tagPitchHigh: document.getElementById("tag-pitch-high"),
+  tagPitchLow: document.getElementById("tag-pitch-low"),
+  tagPitchRise: document.getElementById("tag-pitch-rise"),
+  tagPitchWhisper: document.getElementById("tag-pitch-whisper"),
+
   // Telemetry
   wordCount: document.getElementById("word-count"),
   charCount: document.getElementById("char-count"),
@@ -177,6 +184,7 @@ const dom = {
   pauseVal: document.getElementById("pause-val"),
   pauseTag: document.getElementById("pause-tag"),
   smartPacingToggle: document.getElementById("smart-pacing-toggle"),
+  smartIntonationToggle: document.getElementById("smart-intonation-toggle"),
   pacingContainer: document.getElementById("pacing-container"),
   formatPacingBtn: document.getElementById("format-pacing-btn"),
 
@@ -302,6 +310,13 @@ function bindEventListeners() {
   });
   dom.insertPauseShort.addEventListener("click", () => insertTextAtCursor("[pause: 0.5s] "));
   dom.insertPauseLong.addEventListener("click", () => insertTextAtCursor("[pause: 1.0s] "));
+
+  // Pitch Prosody Tag Helpers
+  if (dom.tagPitchHigh) dom.tagPitchHigh.addEventListener("click", () => wrapSelectionInPitchTag("[pitch: high]", "[/pitch]", "key word"));
+  if (dom.tagPitchLow) dom.tagPitchLow.addEventListener("click", () => wrapSelectionInPitchTag("[pitch: low]", "[/pitch]", "somber phrase"));
+  if (dom.tagPitchRise) dom.tagPitchRise.addEventListener("click", () => wrapSelectionInPitchTag("[pitch: rise]", "[/pitch]", "questioning"));
+  if (dom.tagPitchWhisper) dom.tagPitchWhisper.addEventListener("click", () => wrapSelectionInPitchTag("[pitch: whisper]", "[/pitch]", "whispered secret"));
+
   dom.pasteClipboardBtn.addEventListener("click", handlePasteClipboard);
   dom.clearScriptBtn.addEventListener("click", () => {
     if (dom.scriptInput.value.trim() && confirm("Clear script editor?")) {
@@ -350,9 +365,15 @@ function bindEventListeners() {
   dom.muteBtn.addEventListener("click", toggleMute);
   dom.resetAcousticsBtn.addEventListener("click", resetAcoustics);
 
-  // Pacing controls
+  // Pacing & Intonation controls
   if (dom.pauseSlider) dom.pauseSlider.addEventListener("input", handlePauseChange);
   if (dom.smartPacingToggle) dom.smartPacingToggle.addEventListener("change", handleSmartPacingToggle);
+  if (dom.smartIntonationToggle) {
+    dom.smartIntonationToggle.addEventListener("change", (e) => {
+      state.smartIntonation = e.target.checked;
+      showToast(state.smartIntonation ? "Human Speech Intonation enabled" : "Human Speech Intonation disabled", "info");
+    });
+  }
   if (dom.formatPacingBtn) dom.formatPacingBtn.addEventListener("click", formatScriptForPacing);
 
   // Bitrate pills
@@ -509,6 +530,38 @@ async function handlePasteClipboard() {
   } catch (err) {
     showToast("Clipboard access denied. Press Ctrl+V directly into editor.", "error");
   }
+}
+
+function wrapSelectionInPitchTag(openTag, closeTag, defaultText = "word") {
+  switchScriptView("edit");
+  const input = dom.scriptInput;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const val = input.value;
+
+  if (start !== end) {
+    const selectedText = val.substring(start, end);
+    const replacement = `${openTag}${selectedText}${closeTag}`;
+    input.value = val.substring(0, start) + replacement + val.substring(end);
+    input.selectionStart = start + openTag.length;
+    input.selectionEnd = start + openTag.length + selectedText.length;
+  } else {
+    const replacement = `${openTag}${defaultText}${closeTag}`;
+    input.value = val.substring(0, start) + replacement + val.substring(end);
+    input.selectionStart = start + openTag.length;
+    input.selectionEnd = start + openTag.length + defaultText.length;
+  }
+  input.focus();
+  updateTelemetry();
+  renderTeleprompterTokens();
+}
+
+function stripProsodyTags(text) {
+  if (!text) return "";
+  return text
+    .replace(/\[\/?(?:pitch|speed)[^\]]*\]/gi, "")
+    .replace(/\[(?:pause|break)[:\s]*[\d.]*s?\]|\((?:pause|break)[:\s]*[\d.]*s?\)|\[beat\]/gi, "...")
+    .trim();
 }
 
 // ============================================================================
@@ -725,7 +778,9 @@ function updateTelemetry() {
   const text = dom.scriptInput.value.trim();
   state.scriptText = text;
 
-  const words = text ? text.split(/\s+/).filter(Boolean) : [];
+  // Filter out prosody and pause tags so metrics reflect actual spoken voiceover text
+  const spokenText = stripProsodyTags(text);
+  const words = spokenText ? spokenText.split(/\s+/).filter(Boolean) : [];
   const wordCount = words.length;
   const charCount = text.length;
 
@@ -780,15 +835,21 @@ function renderTeleprompterTokens() {
     return;
   }
 
-  // Split into tokens preserving whitespace and pause tags
-  const tokens = text.split(/(\s+)/);
+  // Match tags [tag ...], closing tags [/tag], or whitespace, or words
+  const tokenRegex = /(\[(?:\/?(?:pitch|speed)[^\]]*|(?:pause|break)[:\s]*[\d.]*s?|beat)\]|\s+|[^\s\[]+)/gi;
   let wordIndex = 0;
   let html = "";
   state.wordsArray = [];
 
-  tokens.forEach(token => {
-    if (token.startsWith("[pause")) {
-      html += `<span class="px-2 py-0.5 rounded bg-studio-800 text-amber-400 text-xs font-mono font-bold mx-1 select-none">${token}</span>`;
+  let match;
+  while ((match = tokenRegex.exec(text)) !== null) {
+    const token = match[0];
+    if (/^\[\/?pitch/i.test(token)) {
+      html += `<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-mono font-semibold mx-0.5 select-none">${escapeHtml(token)}</span>`;
+    } else if (/^\[\/?speed/i.test(token)) {
+      html += `<span class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-xs font-mono font-semibold mx-0.5 select-none">${escapeHtml(token)}</span>`;
+    } else if (/^\[(?:pause|break|beat)/i.test(token)) {
+      html += `<span class="px-2 py-0.5 rounded bg-studio-800 text-amber-400 text-xs font-mono font-bold mx-1 select-none">${escapeHtml(token)}</span>`;
     } else if (/\S/.test(token)) {
       html += `<span class="teleprompter-word" data-word-idx="${wordIndex}">${escapeHtml(token)}</span>`;
       state.wordsArray.push({ index: wordIndex, word: token });
@@ -796,7 +857,7 @@ function renderTeleprompterTokens() {
     } else {
       html += token;
     }
-  });
+  }
 
   dom.teleprompterContent.innerHTML = html;
 }
@@ -954,7 +1015,7 @@ function speakWithBrowserVoice(text, overrideVoiceId = null) {
   }
 
   // Single-pass speech (fallback)
-  const cleanText = text.replace(/\[pause:\s*[\d.]+s\]/gi, "...").replace(/\[beat\]/gi, "...");
+  const cleanText = stripProsodyTags(text);
   const utterance = createUtterance(cleanText, chosenVoice, true);
   state.speechSynthesisUtterance = utterance;
   window.speechSynthesis.speak(utterance);
@@ -969,7 +1030,7 @@ function speakParagraphSequence(paragraphs, voice, index) {
     return;
   }
 
-  const paraText = paragraphs[index].replace(/\[pause:\s*[\d.]+s\]/gi, "...").replace(/\[beat\]/gi, "...").trim();
+  const paraText = stripProsodyTags(paragraphs[index]);
   if (!paraText) {
     speakParagraphSequence(paragraphs, voice, index + 1);
     return;
@@ -1079,7 +1140,8 @@ async function generateNeuralAudio() {
       timestamp_type: "sentence",
       api_key: key,
       paragraph_pause: state.paragraphPause,
-      smart_pacing: state.smartPacing
+      smart_pacing: state.smartPacing,
+      smart_intonation: state.smartIntonation
     };
 
     const resp = await fetch("/api/unrealspeech/generate", {

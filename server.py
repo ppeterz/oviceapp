@@ -29,7 +29,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 import requests
-from mcp_tools import AUDIO_CACHE
+from mcp_tools import (
+    AUDIO_CACHE,
+    Segment,
+    parse_script_into_segments,
+    clean_text_segment,
+    resolve_pitch_value,
+    resolve_speed_value,
+)
 
 DEFAULT_BASE_URL = "https://api.v8.unrealspeech.com"
 IS_VERCEL = bool(os.environ.get("VERCEL"))
@@ -101,107 +108,7 @@ api_router = APIRouter()
 # SCRIPT PACING ENGINE
 # ============================================================================
 
-def clean_text_segment(text: str) -> str:
-    """Normalizes prosody, em dashes, and sentence-terminating punctuation."""
-    t = text.strip()
-    if not t:
-        return ""
-
-    # Normalize em dashes and spaced hyphens
-    t = re.sub(r'\s*—\s*', ' — ', t)
-    t = re.sub(r'\s*--\s*', ' — ', t)
-
-    # Normalize ellipses
-    t = re.sub(r'\.{2,}', '...', t)
-
-    # Ensure terminating punctuation so Kokoro TTS drops pitch naturally at paragraph end
-    if not re.search(r'[.!?…]$', t):
-        t += '.'
-
-    return t
-
-
-def parse_script_into_segments(text: str, default_paragraph_pause: float = 0.8) -> List[Tuple[str, float]]:
-    """
-    Parses a script into a list of (segment_text, pause_after_sec).
-    Handles:
-    - Paragraph breaks (\\n\\n+) -> default_paragraph_pause
-    - Explicit pause markers: [pause: Xs], [pause], (pause), [beat], <break time="..."/>
-    - Sentence end punctuation normalization
-    - Em-dash normalization
-    """
-    if not text or not text.strip():
-        return []
-
-    # Normalize line endings
-    norm_text = text.replace('\r\n', '\n').strip()
-
-    # Pattern for explicit pause tags
-    pause_tag_pattern = re.compile(
-        r'(\[(?:pause|break)[:\s]*([\d.]*)s?\]|\((?:pause|break)[:\s]*([\d.]*)s?\)|\[beat\]|<break\s+time=["\']?([\d.]+)(m?s)["\']?\s*/?>)',
-        re.IGNORECASE
-    )
-
-    # First, split into paragraphs
-    raw_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', norm_text) if p.strip()]
-
-    segments = []
-
-    for p_idx, para in enumerate(raw_paragraphs):
-        is_last_paragraph = (p_idx == len(raw_paragraphs) - 1)
-
-        # Check if paragraph contains explicit pause tags
-        matches = list(pause_tag_pattern.finditer(para))
-        if not matches:
-            # Clean paragraph text
-            clean_p = clean_text_segment(para)
-            if clean_p:
-                pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                segments.append((clean_p, pause_after))
-        else:
-            # Paragraph has internal pause tags -> split by tags
-            last_end = 0
-            for match in matches:
-                span_start, span_end = match.span()
-                part_text = para[last_end:span_start].strip()
-
-                # Determine pause duration
-                full_tag = match.group(0).lower()
-                dur_val = match.group(2) or match.group(3) or match.group(4)
-                unit = match.group(5) or 's'
-
-                if dur_val:
-                    try:
-                        pause_sec = float(dur_val)
-                        if unit == 'ms':
-                            pause_sec /= 1000.0
-                    except ValueError:
-                        pause_sec = 0.6
-                elif 'beat' in full_tag:
-                    pause_sec = 0.5
-                else:  # plain [pause] or (pause)
-                    pause_sec = 0.8
-
-                if part_text:
-                    clean_part = clean_text_segment(part_text)
-                    if clean_part:
-                        segments.append((clean_part, pause_sec))
-                elif segments:
-                    # Trailing or back-to-back pause tag -> increase pause of previous segment
-                    prev_text, prev_pause = segments[-1]
-                    segments[-1] = (prev_text, prev_pause + pause_sec)
-
-                last_end = span_end
-
-            # Remaining text after last tag in this paragraph
-            remaining = para[last_end:].strip()
-            if remaining:
-                clean_rem = clean_text_segment(remaining)
-                if clean_rem:
-                    pause_after = 0.0 if is_last_paragraph else default_paragraph_pause
-                    segments.append((clean_rem, pause_after))
-
-    return segments
+# Script pacing and intonation engine is shared via mcp_tools (Segment, parse_script_into_segments, clean_text_segment)
 
 
 def generate_silence_bytes(duration_sec: float) -> bytes:
@@ -211,7 +118,7 @@ def generate_silence_bytes(duration_sec: float) -> bytes:
 
     # silence_frames.bin is ~0.8s of silence at 192k
     # Calculate number of repeats needed
-    base_duration = 0.8  # approximate duration of one silence frame
+    base_duration = 0.01  # approximate duration of one silence frame
     repeats = max(1, round(duration_sec / base_duration))
     return SILENCE_FRAMES * repeats
 
@@ -273,6 +180,7 @@ class GenerateRequest(BaseModel):
     api_key: Optional[str] = Field(default=None, description="Unreal Speech API key supplied from UI")
     paragraph_pause: float = Field(default=0.8, ge=0.0, le=3.0, description="Silence between paragraphs in seconds")
     smart_pacing: bool = Field(default=True, description="Enable structural pacing with silence stitching")
+    smart_intonation: bool = Field(default=True, description="Enable human-like intonation on questions, exclamations, and parentheticals")
 
 
 class TestKeyRequest(BaseModel):
@@ -400,18 +308,24 @@ def generate_unrealspeech(req: GenerateRequest, x_api_key: Optional[str] = Heade
     if not clean_text:
         raise HTTPException(status_code=400, detail="Script text cannot be empty.")
 
-    # ── Smart Pacing: Parse & Segment ──
+    # ── Smart Pacing & Intonation: Parse & Segment ──
     if req.smart_pacing:
-        segments = parse_script_into_segments(clean_text, req.paragraph_pause)
+        segments = parse_script_into_segments(
+            clean_text,
+            default_paragraph_pause=req.paragraph_pause,
+            base_speed=req.speed,
+            base_pitch=req.pitch,
+            smart_intonation=req.smart_intonation
+        )
     else:
-        segments = [(clean_text_segment(clean_text), 0.0)]
+        segments = [Segment(clean_text_segment(clean_text, is_sentence_end=True), 0.0, req.speed, req.pitch, is_sentence_end=True)]
 
     # Validate total text length (each segment must be <= 3000 chars)
-    for i, (seg_text, _) in enumerate(segments):
-        if len(seg_text) > 3000:
+    for i, seg in enumerate(segments):
+        if len(seg.text) > 3000:
             raise HTTPException(
                 status_code=400,
-                detail=f"Segment {i+1} is {len(seg_text)} characters (max 3000 per segment). Break it into shorter paragraphs."
+                detail=f"Segment {i+1} is {len(seg.text)} characters (max 3000 per segment). Break it into shorter paragraphs."
             )
 
     if not segments:
@@ -419,14 +333,14 @@ def generate_unrealspeech(req: GenerateRequest, x_api_key: Optional[str] = Heade
 
     # ── Single segment: fast path (no stitching needed) ──
     if len(segments) == 1:
-        seg_text, _ = segments[0]
+        seg = segments[0]
         try:
             audio_bytes = synthesize_single_segment(
-                text=seg_text,
+                text=seg.text,
                 voice_id=req.voice_id,
                 bitrate=req.bitrate,
-                speed=req.speed,
-                pitch=req.pitch,
+                speed=seg.speed,
+                pitch=seg.pitch,
                 api_key=key,
                 timestamp_type=req.timestamp_type,
             )
@@ -443,14 +357,14 @@ def generate_unrealspeech(req: GenerateRequest, x_api_key: Optional[str] = Heade
 
     with ThreadPoolExecutor(max_workers=min(4, len(segments))) as executor:
         future_to_idx = {}
-        for idx, (seg_text, _) in enumerate(segments):
+        for idx, seg in enumerate(segments):
             future = executor.submit(
                 synthesize_single_segment,
-                text=seg_text,
+                text=seg.text,
                 voice_id=req.voice_id,
                 bitrate=req.bitrate,
-                speed=req.speed,
-                pitch=req.pitch,
+                speed=seg.speed,
+                pitch=seg.pitch,
                 api_key=key,
                 timestamp_type=req.timestamp_type,
             )
@@ -460,7 +374,7 @@ def generate_unrealspeech(req: GenerateRequest, x_api_key: Optional[str] = Heade
             idx = future_to_idx[future]
             try:
                 segment_audio[idx] = future.result()
-                print(f"  [PACING] Segment {idx+1}/{len(segments)} synthesized ({len(segment_audio[idx])} bytes)")
+                print(f"  [PACING] Segment {idx+1}/{len(segments)} synthesized ({len(segment_audio[idx])} bytes, speed={segments[idx].speed}, pitch={segments[idx].pitch})")
             except Exception as e:
                 errors.append(f"Segment {idx+1}: {str(e)}")
 
@@ -475,16 +389,16 @@ def generate_unrealspeech(req: GenerateRequest, x_api_key: Optional[str] = Heade
     master_audio = io.BytesIO()
 
     for idx in range(len(segments)):
-        seg_text, pause_after = segments[idx]
+        seg = segments[idx]
         audio_data = segment_audio[idx]
 
         master_audio.write(audio_data)
 
-        if pause_after > 0 and idx < len(segments) - 1:
-            silence = generate_silence_bytes(pause_after)
+        if seg.pause_after > 0 and idx < len(segments) - 1:
+            silence = generate_silence_bytes(seg.pause_after)
             if silence:
                 master_audio.write(silence)
-                print(f"  [PACING] Inserted {pause_after:.1f}s silence after segment {idx+1}")
+                print(f"  [PACING] Inserted {seg.pause_after:.2f}s silence after segment {idx+1}")
 
     final_audio = master_audio.getvalue()
     print(f"[PACING] Master audio: {len(final_audio)} bytes ({len(segments)} segments stitched)")
@@ -522,6 +436,7 @@ def _save_and_respond(audio_bytes: bytes, req: GenerateRequest, original_text: s
         "pitch": req.pitch,
         "paragraph_pause": req.paragraph_pause,
         "smart_pacing": req.smart_pacing,
+        "smart_intonation": req.smart_intonation,
         "segment_count": segment_count,
         "timestamp_type": req.timestamp_type,
         "created_at": time.time(),

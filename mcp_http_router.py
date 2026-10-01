@@ -976,6 +976,18 @@ TOOLS_SPEC = [
         "description": (
             "Generate a voiceover MP3 from script text using neural AI voices (Kokoro TTS). "
             "Saves the MP3 and returns download and playback metadata.\n\n"
+            "NATURAL HUMAN SPEECH & PITCH CONTROL:\n"
+            "To make voiceovers sound expressive and natural like human speech:\n"
+            "- Per-word / per-sentence pitch markup tags:\n"
+            "  * Numeric: [pitch: 1.15]emphasized word[/pitch] or [pitch: 0.85]somber note[/pitch]\n"
+            "  * Relative: [pitch: +10%]word[/pitch] or [pitch: -8%]whisper[/pitch]\n"
+            "  * Semantic keywords: [pitch: high], [pitch: low], [pitch: whisper], [pitch: rise], [pitch: drop], [pitch: excited]\n"
+            "  * Shorthand: [high]word[/high], [low]word[/low], [whisper]phrase[/whisper], [rise]word[/rise]\n"
+            "  * Speed markup: [speed: 0.15]rapid speech[/speed] or [speed: fast]urgent[/speed]\n"
+            "- Smart Human Intonation (smart_intonation=True):\n"
+            "  * Automatically inflects rising pitch (+7%) on questions (?)\n"
+            "  * Adds energetic projection (+8%) on exclamations (!)\n"
+            "  * Subdues pitch (-8%) on parenthetical asides (...)\n\n"
             "INSTRUCTIONS FOR CLAUDE:\n"
             "Analyze the script tone and choose the best voice:\n"
             "- Storytelling / narrative -> Eleanor (Female) or Oliver (Male)\n"
@@ -990,7 +1002,7 @@ TOOLS_SPEC = [
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Script text to synthesize. Supports paragraph breaks and pause markers like [pause: 1.2s], [beat].",
+                    "description": "Script text to synthesize. Supports inline pitch tags ([pitch: high], [whisper]), paragraph breaks, and pause markers like [pause: 1.2s], [beat].",
                 },
                 "voice_id": {
                     "type": "string",
@@ -999,12 +1011,12 @@ TOOLS_SPEC = [
                 },
                 "speed": {
                     "type": "number",
-                    "description": "Speed pacing: -1.0 to 1.0 (0.0 is normal).",
+                    "description": "Base speed pacing: -1.0 to 1.0 (0.0 is normal).",
                     "default": 0.0,
                 },
                 "pitch": {
                     "type": "number",
-                    "description": "Pitch factor: 0.5 to 1.5 (1.0 is default).",
+                    "description": "Base pitch factor: 0.5 to 1.5 (1.0 is default).",
                     "default": 1.0,
                 },
                 "bitrate": {
@@ -1020,6 +1032,11 @@ TOOLS_SPEC = [
                 "smart_pacing": {
                     "type": "boolean",
                     "description": "Enable paragraph-aware silence stitching.",
+                    "default": True,
+                },
+                "smart_intonation": {
+                    "type": "boolean",
+                    "description": "Automatically apply human inflection to questions (?), exclamations (!), and parentheticals.",
                     "default": True,
                 },
             },
@@ -1063,6 +1080,7 @@ def execute_tool(name: str, args: Dict[str, Any], request: Optional[Request] = N
         bitrate = str(args.get("bitrate", "192k"))
         paragraph_pause = float(args.get("paragraph_pause", 0.8))
         smart_pacing = bool(args.get("smart_pacing", True))
+        smart_intonation = bool(args.get("smart_intonation", True))
 
         try:
             audio_bytes, segment_count, total_words = _generate_audio(
@@ -1074,6 +1092,7 @@ def execute_tool(name: str, args: Dict[str, Any], request: Optional[Request] = N
                 paragraph_pause=paragraph_pause,
                 smart_pacing=smart_pacing,
                 api_key=api_key,
+                smart_intonation=smart_intonation,
             )
         except Exception as e:
             err = {"error": True, "message": f"Synthesis error: {str(e)}"}

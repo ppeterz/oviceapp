@@ -422,13 +422,13 @@ def list_voices() -> str:
     before calling generate_voiceover.
 
     VOICE SELECTION GUIDE FOR CLAUDE:
-    - Storytelling / narrative → Eleanor (F) or Oliver (M) or Rafael (M)
-    - Documentary / cinematic → Charlotte (F) or Jasper (M)
-    - Commercial / upbeat → Ivy (F) or Ethan (M)
-    - Calm / meditation / ASMR → Luna (F)
-    - Mystery / thriller → Jasper (M) or Luna (F)
-    - Corporate / professional → Charlotte (F) or Oliver (M)
-    - Travel / conversational → Rafael (M)
+    - Storytelling / narrative -> Eleanor (F) or Oliver (M) or Rafael (M)
+    - Documentary / cinematic -> Charlotte (F) or Jasper (M)
+    - Commercial / upbeat -> Ivy (F) or Ethan (M)
+    - Calm / meditation / ASMR -> Luna (F)
+    - Mystery / thriller -> Jasper (M) or Luna (F)
+    - Corporate / professional -> Charlotte (F) or Oliver (M)
+    - Travel / conversational -> Rafael (M)
     """
     return json.dumps(VOICES, indent=2)
 
@@ -449,11 +449,11 @@ def generate_voiceover(
     The generated MP3 is saved to the server's outputs/ folder and metadata is
     returned including the file path and download URL.
 
-    INSTRUCTIONS FOR CLAUDE — CHOOSING SETTINGS:
+    INSTRUCTIONS FOR CLAUDE -- CHOOSING SETTINGS:
     Before calling this tool, call list_voices to see all voices.
     Then analyze the script content and pick the best voice:
     - Match voice gender to user preference if stated
-    - Match voice style to script tone (warm narrative → Eleanor, thriller → Jasper, etc.)
+    - Match voice style to script tone (warm narrative -> Eleanor, thriller -> Jasper, etc.)
     - For speed: keep at 0.0 (normal) unless the content calls for slower (-0.1 to -0.3
       for dramatic/calm) or faster (+0.1 to +0.2 for energetic)
     - For pitch: keep at 1.0 unless male voice benefits from slightly lower (0.92)

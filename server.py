@@ -659,6 +659,16 @@ if OUTPUTS_DIR.exists():
     except Exception:
         pass
 
+# Mount MCP Streamable HTTP endpoint for claude.ai browser integration
+# Claude.ai connects to https://your-domain.vercel.app/mcp as a remote MCP server
+try:
+    from mcp_tools import mcp as mcp_server
+    mcp_http_app = mcp_server.streamable_http_app()
+    app.mount("/mcp", mcp_http_app)
+    print("[MCP] Remote MCP endpoint mounted at /mcp")
+except Exception as e:
+    print(f"[MCP] Could not mount MCP endpoint: {e}")
+
 # Mount static frontend directory
 if STATIC_DIR.exists():
     try:

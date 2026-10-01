@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "voiceover-studio": {
+      "command": "python",
+      "args": [
+        "c:\\Users\\USER\\Documents\\oviceapp\\mcp_voiceover_server.py"
+      ],
+      "env": {
+        "UNREALSPEECH_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}

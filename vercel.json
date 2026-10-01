@@ -4,5 +4,10 @@
     "api/[...path].py": {
       "maxDuration": 60
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/outputs/:path*", "destination": "/api/outputs/:path*" },
+    { "source": "/download/:path*", "destination": "/api/download/:path*" }
+  ]
 }

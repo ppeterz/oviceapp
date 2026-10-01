@@ -1105,22 +1105,18 @@ def execute_tool(name: str, args: Dict[str, Any], request: Optional[Request] = N
                 base_url = v_url if v_url.startswith("http") else f"https://{v_url}"
 
         filename = meta.get("filename", "")
-        download_path = meta.get("download_url", f"/api/download/{filename}")
-        audio_path = meta.get("audio_url", f"/outputs/{filename}")
+        # Use /api paths so Vercel forwards requests directly to the serverless function
+        download_path = f"/api/download/{filename}"
+        audio_path = f"/api/outputs/{filename}"
 
         download_url = f"{base_url}{download_path}" if base_url else download_path
         audio_url = f"{base_url}{audio_path}" if base_url else audio_path
-
-        # Generate base64 data URI for instant, zero-network playback in iframe
-        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-        audio_data_url = f"data:audio/mp3;base64,{audio_b64}"
 
         result_dict = {
             "success": True,
             "filename": filename,
             "download_url": download_url,
             "audio_url": audio_url,
-            "audio_data_url": audio_data_url,
             "voice_id": voice_id,
             "word_count": total_words,
             "segment_count": segment_count,

@@ -26,9 +26,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, HTTPException, Header, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 import requests
+from mcp_tools import AUDIO_CACHE
 
 DEFAULT_BASE_URL = "https://api.v8.unrealspeech.com"
 IS_VERCEL = bool(os.environ.get("VERCEL"))
@@ -607,6 +608,19 @@ def download_audio_file(filename: str):
     safe_filename = Path(filename).name
     out_filename = safe_filename if safe_filename.lower().endswith(".mp3") else f"{safe_filename}.mp3"
 
+    # Fast-path: check in-memory cache
+    for fname in [safe_filename, out_filename]:
+        if fname in AUDIO_CACHE:
+            return Response(
+                content=AUDIO_CACHE[fname],
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{out_filename}"',
+                    "Accept-Ranges": "bytes",
+                    "Cache-Control": "public, max-age=86400",
+                }
+            )
+
     search_dirs = [OUTPUTS_DIR]
     if Path("/tmp/outputs") != OUTPUTS_DIR and Path("/tmp/outputs").exists():
         search_dirs.append(Path("/tmp/outputs"))
@@ -633,6 +647,21 @@ def download_audio_file(filename: str):
 def stream_audio_file(filename: str):
     """Direct stream for /outputs/{filename} in serverless environments."""
     safe_filename = Path(filename).name
+    out_filename = safe_filename if safe_filename.lower().endswith(".mp3") else f"{safe_filename}.mp3"
+
+    # Fast-path: check in-memory cache
+    for fname in [safe_filename, out_filename]:
+        if fname in AUDIO_CACHE:
+            return Response(
+                content=AUDIO_CACHE[fname],
+                media_type="audio/mpeg",
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Disposition": f'inline; filename="{safe_filename}"',
+                    "Cache-Control": "public, max-age=86400",
+                }
+            )
+
     search_dirs = [OUTPUTS_DIR]
     if Path("/tmp/outputs") != OUTPUTS_DIR and Path("/tmp/outputs").exists():
         search_dirs.append(Path("/tmp/outputs"))

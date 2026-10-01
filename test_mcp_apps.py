@@ -79,13 +79,14 @@ with patch("mcp_http_router._generate_audio", return_value=(fake_audio, 2, 25)),
     print("success:", sc.get("success"))
     print("voice_id:", sc.get("voice_id"))
     print("audio_url:", sc.get("audio_url"))
-    print("has audio_data_url:", sc.get("audio_data_url", "").startswith("data:audio/mp3;base64,"))
+    print("download_url:", sc.get("download_url"))
     assert sc["success"] is True
     assert sc["voice_id"] == "Jasper"
     assert sc["word_count"] == 25
-    assert sc["audio_data_url"].startswith("data:audio/mp3;base64,")
     assert sc["audio_url"].endswith(".mp3")
-    assert sc["download_url"].startswith("http")
-    assert sc["audio_url"].startswith("http")
+    assert "/api/outputs/" in sc["audio_url"]
+    assert "/api/download/" in sc["download_url"]
+    # Verify the payload size is compact (< 2 KB) to prevent context limit errors
+    assert len(json.dumps(sc)) < 2048
 
 print("\nAll 6 tests passed successfully!")

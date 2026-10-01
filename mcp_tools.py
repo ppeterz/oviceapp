@@ -15,6 +15,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -344,6 +345,10 @@ def _generate_audio(
     return master.getvalue(), len(segments), total_words
 
 
+# In-memory audio cache for rapid playback without disk latency
+AUDIO_CACHE: Dict[str, bytes] = {}
+
+
 def _save_result(
     audio_bytes: bytes,
     voice_id: str,
@@ -361,6 +366,12 @@ def _save_result(
     timestamp = int(time.time())
     filename = f"take_{timestamp}_{voice_id.lower()}_{take_id}.mp3"
     file_path = OUTPUTS_DIR / filename
+
+    # Cache in memory for instant delivery
+    AUDIO_CACHE[filename] = audio_bytes
+    if len(AUDIO_CACHE) > 50:
+        oldest = next(iter(AUDIO_CACHE))
+        AUDIO_CACHE.pop(oldest, None)
 
     try:
         with open(file_path, "wb") as f:

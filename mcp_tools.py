@@ -280,7 +280,7 @@ def parse_paragraph_intonation(
                     seg_pitch = round(max(0.5, base_pitch * 0.92), 3)  # Parenthetical / aside
 
                 is_para_end = (i >= len(sentence_parts))
-                pause_after = (0.0 if is_last_paragraph else default_pause) if is_para_end else 0.30
+                pause_after = (0.0 if is_last_paragraph else default_pause) if is_para_end else 0.08
 
                 clean_s = clean_text_segment(combined, is_sentence_end=True)
                 if clean_s:
@@ -346,12 +346,14 @@ def parse_paragraph_intonation(
                     p_sec = float(dur_val)
                     if unit == 'ms':
                         p_sec /= 1000.0
+                    # Clamp explicit pauses to max 0.2s for natural flow
+                    p_sec = min(p_sec, 0.2)
                 except ValueError:
-                    p_sec = 0.6
+                    p_sec = 0.1
             elif 'beat' in full_tag:
-                p_sec = 0.5
+                p_sec = 0.1
             else:
-                p_sec = 0.8
+                p_sec = 0.15
             raw_tokens.append(("pause", "", base_speed, base_pitch, p_sec))
 
         elif m_dict.get("pitch_tag"):
@@ -413,7 +415,7 @@ def parse_paragraph_intonation(
         elif is_last_token:
             pause_after = 0.0 if is_last_paragraph else default_pause
         elif ends_sentence:
-            pause_after = 0.30
+            pause_after = 0.08
         else:
             # Mid-sentence word or clause: zero pause so speech flows seamlessly
             pause_after = 0.0
@@ -427,7 +429,7 @@ def parse_paragraph_intonation(
 
 def parse_script_into_segments(
     text: str,
-    default_paragraph_pause: float = 0.8,
+    default_paragraph_pause: float = 0.15,
     base_speed: float = 0.0,
     base_pitch: float = 1.0,
     smart_intonation: bool = True
@@ -464,10 +466,12 @@ def parse_script_into_segments(
 
 
 def generate_silence_bytes(duration_sec: float) -> bytes:
-    """Generate silence MP3 bytes for the given duration."""
+    """Generate silence MP3 bytes for the given duration (capped at 0.2s max)."""
     if not SILENCE_FRAMES or duration_sec <= 0:
         return b""
-    base_duration = 0.8
+    # Clamp to max 0.2s for natural human speech feel
+    duration_sec = min(duration_sec, 0.2)
+    base_duration = 0.026  # ~26ms per MP3 frame
     repeats = max(1, round(duration_sec / base_duration))
     return SILENCE_FRAMES * repeats
 
@@ -541,7 +545,7 @@ def _generate_audio(
 
     speed = max(-1.0, min(1.0, speed))
     pitch = max(0.5, min(1.5, pitch))
-    paragraph_pause = max(0.0, min(3.0, paragraph_pause))
+    paragraph_pause = max(0.0, min(0.5, paragraph_pause))
 
     if smart_pacing:
         segments = parse_script_into_segments(
@@ -734,7 +738,7 @@ def generate_voiceover(
     speed: float = 0.0,
     pitch: float = 1.0,
     bitrate: str = "192k",
-    paragraph_pause: float = 0.8,
+    paragraph_pause: float = 0.15,
     smart_pacing: bool = True,
     smart_intonation: bool = True,
 ) -> str:
@@ -766,13 +770,13 @@ def generate_voiceover(
 
     Args:
         text: The script text to synthesize. Supports prosody tags ([pitch: high], [whisper])
-              and pause markers like [pause: 1.2s], [beat].
+              and pause markers like [pause: 0.1s], [beat].
         voice_id: Kokoro TTS voice. One of: Eleanor, Jasper, Ivy, Oliver,
                   Luna, Ethan, Charlotte, Rafael. Default: Eleanor.
         speed: Base pacing from -1.0 (slow) to 1.0 (fast). 0.0 is normal.
         pitch: Base pitch from 0.5 to 1.5. Default 1.0.
         bitrate: Audio quality. 192k (default), 128k, 256k, or 320k.
-        paragraph_pause: Seconds of silence between paragraphs (0.0-3.0). Default 0.8.
+        paragraph_pause: Seconds of silence between paragraphs (0.0-0.5). Default 0.15.
         smart_pacing: If True (default), parses paragraph breaks and pause markers.
         smart_intonation: If True (default), automatically applies human inflection
                           to questions, exclamations, and parentheticals.

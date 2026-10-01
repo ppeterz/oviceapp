@@ -995,7 +995,11 @@ TOOLS_SPEC = [
             "- Commercial / energetic -> Ivy (Female) or Ethan (Male)\n"
             "- Meditation / calm -> Luna (Female)\n"
             "- Charismatic / travel -> Rafael (Male)\n"
-            "Keep speed at 0.0 (normal) and pitch at 1.0 unless a subtle adjustment fits."
+            "Keep speed at 0.0 (normal) and pitch at 1.0 unless a subtle adjustment fits.\n"
+            "CRITICAL PAUSE RULE: Do NOT insert large pauses. Max pause is 0.1-0.2s. "
+            "Natural human speech has only micro-gaps between sentences (80-150ms). "
+            "Use [pause: 0.1s] or [beat] for brief dramatic breaths, never more than 0.2s. "
+            "Set paragraph_pause to 0.10-0.15 for seamless natural delivery."
         ),
         "inputSchema": {
             "type": "object",
@@ -1026,8 +1030,8 @@ TOOLS_SPEC = [
                 },
                 "paragraph_pause": {
                     "type": "number",
-                    "description": "Silence in seconds between paragraphs (0.0 to 3.0).",
-                    "default": 0.8,
+                    "description": "Silence in seconds between paragraphs (0.0 to 0.5). Keep at 0.10-0.20 for natural human-like flow. Default 0.15.",
+                    "default": 0.15,
                 },
                 "smart_pacing": {
                     "type": "boolean",

@@ -178,7 +178,7 @@ class GenerateRequest(BaseModel):
     pitch: float = Field(default=1.0, ge=0.5, le=1.5, description="Pitch: 0.5 to 1.5")
     timestamp_type: str = Field(default="sentence", description="sentence or word")
     api_key: Optional[str] = Field(default=None, description="Unreal Speech API key supplied from UI")
-    paragraph_pause: float = Field(default=0.8, ge=0.0, le=3.0, description="Silence between paragraphs in seconds")
+    paragraph_pause: float = Field(default=0.15, ge=0.0, le=0.5, description="Silence between paragraphs in seconds (max 0.5 for natural speech)")
     smart_pacing: bool = Field(default=True, description="Enable structural pacing with silence stitching")
     smart_intonation: bool = Field(default=True, description="Enable human-like intonation on questions, exclamations, and parentheticals")
 

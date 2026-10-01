@@ -87,7 +87,7 @@ const state = {
   apiKey: localStorage.getItem("unrealspeech_api_key") || "",
   
   // Pacing & Cadence
-  paragraphPause: 0.8,
+  paragraphPause: 0.15,
   smartPacing: true,
   smartIntonation: true,
   
@@ -308,8 +308,8 @@ function bindEventListeners() {
       loadSampleScript(e.target.value);
     }
   });
-  dom.insertPauseShort.addEventListener("click", () => insertTextAtCursor("[pause: 0.5s] "));
-  dom.insertPauseLong.addEventListener("click", () => insertTextAtCursor("[pause: 1.0s] "));
+  dom.insertPauseShort.addEventListener("click", () => insertTextAtCursor("[pause: 0.1s] "));
+  dom.insertPauseLong.addEventListener("click", () => insertTextAtCursor("[pause: 0.2s] "));
 
   // Pitch Prosody Tag Helpers
   if (dom.tagPitchHigh) dom.tagPitchHigh.addEventListener("click", () => wrapSelectionInPitchTag("[pitch: high]", "[/pitch]", "key word"));
@@ -701,7 +701,7 @@ function resetAcoustics() {
   handleVolumeChange();
   // Reset pacing
   if (dom.pauseSlider) {
-    dom.pauseSlider.value = 0.8;
+    dom.pauseSlider.value = 0.15;
     handlePauseChange();
   }
   if (dom.smartPacingToggle) {
@@ -716,13 +716,13 @@ function handlePauseChange() {
   state.paragraphPause = p;
   dom.pauseVal.textContent = p.toFixed(2) + "s";
 
-  let tag = "Storytelling";
-  if (p <= 0.3) tag = "Snappy";
-  else if (p <= 0.5) tag = "Conversational";
-  else if (p <= 0.9) tag = "Storytelling";
-  else if (p <= 1.3) tag = "Dramatic Beat";
-  else if (p <= 1.8) tag = "Cinematic";
-  else tag = "Deep Breath";
+  let tag = "Natural";
+  if (p <= 0.05) tag = "Seamless";
+  else if (p <= 0.10) tag = "Tight";
+  else if (p <= 0.20) tag = "Natural";
+  else if (p <= 0.30) tag = "Breath";
+  else if (p <= 0.40) tag = "Spacious";
+  else tag = "Dramatic";
   dom.pauseTag.textContent = tag;
 }
 
